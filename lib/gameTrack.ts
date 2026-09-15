@@ -32,6 +32,11 @@ export interface Cell {
   y: number;
 }
 
+/** Where the scooter is and which way it points. */
+export interface Pose extends Cell {
+  heading: Heading;
+}
+
 /** Screen-space delta for one step in each heading. y grows downward. */
 export const STEP: Record<Heading, Cell> = {
   N: { x: 0, y: -1 },
@@ -74,6 +79,48 @@ export function isRoad(x: number, y: number): boolean {
 
 export const isFinish = (x: number, y: number) =>
   x === FINISH.x && y === FINISH.y;
+
+/**
+ * Checkpoints up the pass.
+ *
+ * Each hairpin narrows to a couple of squares, so a whole row of road is a
+ * gate the scooter cannot get past any other way — no need to enumerate
+ * cells, the row *is* the chokepoint. Clearing one is progress the player
+ * keeps even when the next attempt ends in a tree.
+ */
+export const GATES = [
+  { row: 2, name: 'FIRST HAIRPIN' },
+  { row: 4, name: 'SECOND HAIRPIN' },
+  { row: 6, name: 'THE NEEDLE' },
+  { row: 8, name: 'LAST BEND' },
+] as const;
+
+export const GATE_COUNT = GATES.length;
+
+/** Index of the gate this cell belongs to, or -1 for ordinary road. */
+export function gateAt(x: number, y: number): number {
+  if (!isRoad(x, y)) return -1;
+  return GATES.findIndex((g) => g.row === y);
+}
+
+/** The square directly in front of a pose. */
+export const cellAhead = (p: Pose): Cell => ({
+  x: p.x + STEP[p.heading].x,
+  y: p.y + STEP[p.heading].y,
+});
+
+/** How many squares of road lie straight ahead before the road runs out. */
+export function roadAhead(p: Pose): number {
+  let n = 0;
+  let { x, y } = p;
+  for (;;) {
+    x += STEP[p.heading].x;
+    y += STEP[p.heading].y;
+    if (!isRoad(x, y)) return n;
+    n += 1;
+    if (n > GRID * GRID) return n; // paranoia; the map is finite
+  }
+}
 
 /** Terrain flavour for off-road cells, stable per coordinate. */
 export function scenery(x: number, y: number): 'tree' | 'rock' | 'grass' {

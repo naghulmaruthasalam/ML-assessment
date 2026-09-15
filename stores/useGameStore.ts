@@ -2,9 +2,11 @@
 
 import { create } from 'zustand';
 import {
+  GATES,
   START,
   START_HEADING,
   STEP,
+  gateAt,
   isRoad,
   isFinish,
   turnLeft,
@@ -13,6 +15,10 @@ import {
 } from '@/lib/gameTrack';
 
 const UNLOCK_KEY = 'gateway-unlocked';
+const BEST_KEY = 'gateway-best-gate';
+const DRAFT_KEY = 'gateway-route-src';
+
+const cellKey = (x: number, y: number) => `${x},${y}`;
 
 /**
  * One thing the Python code asked for. The user's program produces a list of
@@ -32,7 +38,11 @@ export interface Frame {
   jumping: boolean;
   /** Set when this frame is where the run ends badly. */
   crash: 'offroad' | null;
+  /** True only for a frame that is an actual step forward — not a turn. */
+  moved?: boolean;
   log?: string;
+  /** Index into GATES when this frame is the first to reach that hairpin. */
+  gate?: number;
 }
 
 export type RunStatus =
@@ -53,15 +63,26 @@ interface GameState {
   console: string[];
   unlocked: boolean;
 
+  /** Road squares touched during the current run, as "x,y". */
+  trail: string[];
+  /** Hairpins cleared in the current run. */
+  gate: number;
+  /** Best hairpin count across every attempt, kept between visits. */
+  bestGate: number;
+  /** The player's own source, restored between visits. Never seeded. */
+  draft: string;
+
   hydrate: () => void;
   setStatus: (s: RunStatus) => void;
   log: (line: string) => void;
   reset: () => void;
   applyFrame: (f: Frame) => void;
+  clearGate: (index: number) => void;
+  saveDraft: (src: string) => void;
   markUnlocked: () => void;
 }
 
-export const useGameStore = create<GameState>((set) => ({
+export const useGameStore = create<GameState>((set, get) => ({
   x: START.x,
   y: START.y,
   heading: START_HEADING,
@@ -71,9 +92,19 @@ export const useGameStore = create<GameState>((set) => ({
   console: [],
   unlocked: false,
 
+  trail: [cellKey(START.x, START.y)],
+  gate: 0,
+  bestGate: 0,
+  draft: '',
+
   hydrate: () => {
     try {
-      set({ unlocked: window.localStorage.getItem(UNLOCK_KEY) === '1' });
+      const best = Number(window.localStorage.getItem(BEST_KEY) ?? 0);
+      set({
+        unlocked: window.localStorage.getItem(UNLOCK_KEY) === '1',
+        bestGate: Number.isFinite(best) ? Math.min(best, GATES.length) : 0,
+        draft: window.localStorage.getItem(DRAFT_KEY) ?? '',
+      });
     } catch {
       // Storage unavailable; the gate simply stays closed for this visit.
     }
@@ -91,10 +122,47 @@ export const useGameStore = create<GameState>((set) => ({
       jumping: false,
       status: 'idle',
       console: [],
+      trail: [cellKey(START.x, START.y)],
+      gate: 0,
     }),
 
   applyFrame: (f) =>
-    set({ x: f.x, y: f.y, heading: f.heading, jumping: f.jumping }),
+    set((s) => {
+      const key = cellKey(f.x, f.y);
+      return {
+        x: f.x,
+        y: f.y,
+        heading: f.heading,
+        jumping: f.jumping,
+        // Only road squares earn a tyre track; the crash frame is off-road.
+        trail:
+          f.crash || s.trail.includes(key) ? s.trail : [...s.trail, key],
+      };
+    }),
+
+  clearGate: (index) => {
+    const reached = index + 1;
+    if (reached > get().bestGate) {
+      try {
+        window.localStorage.setItem(BEST_KEY, String(reached));
+      } catch {
+        // Non-fatal — the badge just resets on the next visit.
+      }
+    }
+    set((s) => ({
+      gate: Math.max(s.gate, reached),
+      bestGate: Math.max(s.bestGate, reached),
+    }));
+  },
+
+  saveDraft: (draft) => {
+    try {
+      window.localStorage.setItem(DRAFT_KEY, draft);
+    } catch {
+      // Non-fatal — the source just lives in memory for this visit.
+    }
+    set({ draft });
+  },
 
   markUnlocked: () => {
     try {
@@ -120,6 +188,7 @@ export function planRoute(commands: Command[]): Frame[] {
   let x = START.x;
   let y = START.y;
   let heading: Heading = START_HEADING;
+  const gatesSeen = new Set<number>();
 
   for (const cmd of commands) {
     if (cmd.kind === 'turn') {
@@ -158,7 +227,22 @@ export function planRoute(commands: Command[]): Frame[] {
 
       x = nx;
       y = ny;
-      frames.push({ x, y, heading, jumping: false, crash: null });
+
+      // A hairpin only counts the first time it is crossed in a run, so
+      // driving back and forth over one cannot inflate the progress badge.
+      const gate = gateAt(x, y);
+      const fresh = gate !== -1 && !gatesSeen.has(gate);
+      if (fresh) gatesSeen.add(gate);
+
+      frames.push({
+        x,
+        y,
+        heading,
+        jumping: false,
+        crash: null,
+        moved: true,
+        ...(fresh ? { gate } : null),
+      });
 
       if (isFinish(x, y)) return frames;
     }

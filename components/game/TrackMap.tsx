@@ -3,10 +3,13 @@
 import { motion } from 'framer-motion';
 import {
   TRACK_ROWS,
+  GATES,
+  GATE_COUNT,
   GRID,
   FINISH,
   START,
   HEADING_DEG,
+  gateAt,
   isRoad,
   scenery,
 } from '@/lib/gameTrack';
@@ -15,8 +18,8 @@ import { useGameStore } from '@/stores/useGameStore';
 /**
  * The scenic map.
  *
- * The grid itself is static and rendered once. Only the vehicle moves, and
- * it moves by transform — Framer tweens x/y/rotate, so the whole drive is a
+ * The grid itself is static apart from the tyre tracks, and the vehicle
+ * moves by transform — Framer tweens x/y/rotate, so the drive is a
  * compositor job with no layout work per step.
  */
 
@@ -28,13 +31,19 @@ export default function TrackMap() {
   const heading = useGameStore((s) => s.heading);
   const jumping = useGameStore((s) => s.jumping);
   const status = useGameStore((s) => s.status);
+  const trail = useGameStore((s) => s.trail);
+  const gate = useGameStore((s) => s.gate);
 
+  const driven = new Set(trail);
   const size = GRID * CELL;
 
   return (
     <div className="anime-panel overflow-hidden">
       <div className="flex items-center gap-3 border-b-2 border-[var(--line)] bg-[var(--surface-alt)] px-4 py-2 font-mono text-[10px] font-bold tracking-widest">
         <span>SWITCHBACK PASS</span>
+        <span className="text-[var(--accent)]">
+          {gate}/{GATE_COUNT} HAIRPINS
+        </span>
         <span className="ml-auto text-[var(--ink-muted)]">
           {status === 'driving'
             ? 'DRIVING'
@@ -44,6 +53,23 @@ export default function TrackMap() {
                 ? 'FINISHED'
                 : `X ${x} · Y ${y} · ${heading}`}
         </span>
+      </div>
+
+      {/* Climb meter. Reads at a glance how far up the pass the last run got. */}
+      <div className="flex gap-1 border-b-2 border-[var(--line)] bg-[var(--surface-alt)] px-4 py-2">
+        {GATES.map((g, i) => (
+          <div key={g.name} className="flex-1">
+            <div
+              className="h-1.5 border border-[var(--line)]"
+              style={{
+                background: i < gate ? 'var(--accent)' : 'transparent',
+              }}
+            />
+            <p className="mt-1 truncate font-mono text-[8px] tracking-widest text-[var(--ink-muted)]">
+              {g.name}
+            </p>
+          </div>
+        ))}
       </div>
 
       <div className="flex justify-center bg-[var(--surface-alt)] p-3">
@@ -65,9 +91,17 @@ export default function TrackMap() {
             }}
           >
             {TRACK_ROWS.map((row, ry) =>
-              row.split('').map((_, rx) => (
-                <Tile key={`${rx}-${ry}`} x={rx} y={ry} />
-              )),
+              row
+                .split('')
+                .map((_, rx) => (
+                  <Tile
+                    key={`${rx}-${ry}`}
+                    x={rx}
+                    y={ry}
+                    driven={driven.has(`${rx},${ry}`)}
+                    gateLit={gateAt(rx, ry) !== -1 && gateAt(rx, ry) < gate}
+                  />
+                )),
             )}
           </div>
 
@@ -111,7 +145,17 @@ export default function TrackMap() {
 
 /* ------------------------------------------------------------------ */
 
-function Tile({ x, y }: { x: number; y: number }) {
+function Tile({
+  x,
+  y,
+  driven,
+  gateLit,
+}: {
+  x: number;
+  y: number;
+  driven: boolean;
+  gateLit: boolean;
+}) {
   const road = isRoad(x, y);
   const finish = x === FINISH.x && y === FINISH.y;
   const start = x === START.x && y === START.y;
@@ -127,11 +171,29 @@ function Tile({ x, y }: { x: number; y: number }) {
   }
 
   if (road) {
+    const isGate = gateAt(x, y) !== -1;
     return (
       <div
-        className="border border-[var(--line)]"
+        className="relative border border-[var(--line)]"
         style={{ background: 'var(--surface)' }}
       >
+        {/* Hairpin marker: hollow until the run has crossed it. */}
+        {isGate && (
+          <span
+            className="absolute inset-x-1 top-1/2 h-[3px] -translate-y-1/2 border border-[var(--accent)]"
+            style={{ background: gateLit ? 'var(--accent)' : 'transparent' }}
+            aria-hidden
+          />
+        )}
+
+        {/* Tyre tracks: where this run actually went. */}
+        {driven && !start && (
+          <span
+            className="absolute inset-0 m-auto h-1.5 w-1.5 rounded-full bg-[var(--ink-muted)] opacity-60"
+            aria-hidden
+          />
+        )}
+
         {start && (
           <span className="flex h-full w-full items-center justify-center font-mono text-[9px] text-[var(--ink-muted)]">
             S

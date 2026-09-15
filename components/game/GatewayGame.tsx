@@ -6,6 +6,8 @@ import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
 import TrackMap from './TrackMap';
 import { runPlayerCode } from '@/lib/gameBridge';
+import { playCrash, playMove, playWin } from '@/lib/gameSounds';
+import { GATES, GATE_COUNT } from '@/lib/gameTrack';
 import {
   useGameStore,
   planRoute,
@@ -22,40 +24,60 @@ const MonacoEditor = dynamic(() => import('@monaco-editor/react'), {
   ),
 });
 
-const STARTER = `# Switchback Pass. Get the scooter to the flag.
-#
-#   move(n)       drive n squares forward
-#   turn_right()  rotate 90 degrees, without moving
-#   turn_left()   rotate the other way
-#   say(text)     print to the console
-#
-# You start facing EAST. Loops work — try one.
-
-move(4)
-turn_right()
-`;
+/**
+ * route.py opens empty, and stays empty.
+ *
+ * A starter snippet is the difference between a player solving the pass and
+ * a player editing someone else's solution. The command set is not hidden —
+ * it is one `help()` away, inside the runtime, where a driver would look for
+ * it — but every line that reaches the flag is theirs.
+ */
 
 /** Milliseconds per replay frame. */
 const FRAME_MS = 260;
 
+/** How long the draft sits still before it is written to storage. */
+const DRAFT_DEBOUNCE_MS = 400;
+
+/**
+ * How long the crash sits on screen — sound included — before the run wipes
+ * back to a blank slate. Long enough to register as a consequence, short
+ * enough that the player is back at the keyboard quickly.
+ */
+const RESTART_DELAY_MS = 1300;
+
+const PATHS = [
+  { name: 'Machine Learning', codename: 'The Pattern Alchemist' },
+  { name: 'Deep Learning', codename: 'Neural Forge' },
+  { name: 'Reinforcement Learning', codename: 'Autonomous Dojo' },
+];
+
 export default function GatewayGame() {
   const router = useRouter();
-  const [code, setCode] = useState(STARTER);
+  const [code, setCode] = useState('');
   const [showWin, setShowWin] = useState(false);
   const timers = useRef<number[]>([]);
+  const draftTimer = useRef<number | null>(null);
 
   const status = useGameStore((s) => s.status);
   const consoleLines = useGameStore((s) => s.console);
   const unlocked = useGameStore((s) => s.unlocked);
+  const bestGate = useGameStore((s) => s.bestGate);
   const hydrate = useGameStore((s) => s.hydrate);
   const setStatus = useGameStore((s) => s.setStatus);
   const log = useGameStore((s) => s.log);
   const reset = useGameStore((s) => s.reset);
   const applyFrame = useGameStore((s) => s.applyFrame);
+  const clearGate = useGameStore((s) => s.clearGate);
+  const saveDraft = useGameStore((s) => s.saveDraft);
   const markUnlocked = useGameStore((s) => s.markUnlocked);
 
+  // Restore whatever the player wrote last visit — their own work, never a
+  // seeded solution.
   useEffect(() => {
     hydrate();
+    const saved = useGameStore.getState().draft;
+    if (saved) setCode(saved);
   }, [hydrate]);
 
   // Any pending replay must die with the component, or it will keep writing
@@ -67,6 +89,26 @@ export default function GatewayGame() {
 
   useEffect(() => clearTimers, [clearTimers]);
 
+  useEffect(
+    () => () => {
+      if (draftTimer.current) window.clearTimeout(draftTimer.current);
+    },
+    [],
+  );
+
+  const onCodeChange = useCallback(
+    (value: string | undefined) => {
+      const next = value ?? '';
+      setCode(next);
+      if (draftTimer.current) window.clearTimeout(draftTimer.current);
+      draftTimer.current = window.setTimeout(
+        () => saveDraft(next),
+        DRAFT_DEBOUNCE_MS,
+      );
+    },
+    [saveDraft],
+  );
+
   /** Walks the planned frames, one per tick. */
   const replay = useCallback(
     (frames: Frame[]) => {
@@ -75,26 +117,47 @@ export default function GatewayGame() {
       frames.forEach((frame, i) => {
         const t = window.setTimeout(() => {
           applyFrame(frame);
+          if (frame.moved) playMove();
           if (frame.log) log(frame.log);
+
+          if (frame.gate !== undefined) {
+            clearGate(frame.gate);
+            log(
+              `>> ${GATES[frame.gate].name} cleared — ${frame.gate + 1}/${GATE_COUNT}`,
+            );
+          }
 
           if (frame.crash) {
             setStatus('crashed');
+            playCrash();
             log('>> off the road. the scooter does not do grass.');
+            log('>> resetting — the pass does not forgive a wrong turn.');
+
+            const restart = window.setTimeout(() => {
+              reset();
+              setCode('');
+              saveDraft('');
+              log(
+                '>> scooter back at the start. route.py cleared — write the climb again.',
+              );
+            }, RESTART_DELAY_MS);
+            timers.current.push(restart);
             return;
           }
 
           if (frameIsFinish(frame)) {
             log('>> flag reached.');
+            playWin();
             markUnlocked();
             setShowWin(true);
-            const go = window.setTimeout(() => router.push('/dashboard'), 2200);
+            const go = window.setTimeout(() => router.push('/dashboard'), 3600);
             timers.current.push(go);
             return;
           }
 
           if (i === frames.length - 1) {
             setStatus('idle');
-            log('>> program ended before the flag.');
+            log('>> program ended before the flag. the road goes on.');
           }
         }, i * FRAME_MS);
 
@@ -103,15 +166,22 @@ export default function GatewayGame() {
 
       if (frames.length === 0) {
         setStatus('idle');
-        log('>> no commands. the scooter is still parked.');
+        log('>> the program ran but issued no commands. the scooter is parked.');
       }
     },
-    [applyFrame, log, markUnlocked, router, setStatus],
+    [applyFrame, clearGate, log, markUnlocked, reset, router, saveDraft, setStatus],
   );
 
   const execute = useCallback(async () => {
     clearTimers();
     reset();
+
+    if (!code.trim()) {
+      log('>> route.py is empty. the scooter has no instructions.');
+      log('>> the onboard computer answers to help(). ask it something.');
+      return;
+    }
+
     setStatus('booting');
     log('>> booting python…');
 
@@ -133,6 +203,13 @@ export default function GatewayGame() {
       return;
     }
 
+    // A program that only asked the computer questions is not a failed run.
+    if (result.commands.length === 0) {
+      setStatus('idle');
+      log('>> no driving commands in that one. the scooter is still parked.');
+      return;
+    }
+
     log(`>> ${result.commands.length} command(s) captured. rolling.`);
     replay(planRoute(result.commands));
   }, [code, clearTimers, log, replay, reset, setStatus]);
@@ -150,10 +227,19 @@ export default function GatewayGame() {
           <span className="underline-wavy-accent">Switchback</span> Pass
         </h1>
         <p className="mt-5 max-w-xl text-sm leading-relaxed text-[var(--ink-muted)] sm:text-base">
-          The road up the mountain doubles back on itself. Drive the scooter to
-          the flag using Python and the curriculum opens. Python runs in this
-          tab — nothing is sent anywhere.
+          The road up the mountain doubles back on itself, four hairpins to the
+          flag. Nobody left you a starter file — the scooter has an onboard
+          computer, and it answers to{' '}
+          <code className="font-mono text-[var(--ink)]">help()</code>. Work out
+          the route, write it yourself, and the curriculum opens. Python runs in
+          this tab; nothing is sent anywhere.
         </p>
+
+        {bestGate > 0 && !unlocked && (
+          <p className="mt-5 inline-block border-2 border-[var(--line)] px-3 py-1.5 font-mono text-[11px] font-bold tracking-widest">
+            FURTHEST CLIMB · {bestGate}/{GATE_COUNT} HAIRPINS
+          </p>
+        )}
 
         {unlocked && (
           <button
@@ -177,7 +263,7 @@ export default function GatewayGame() {
             <div className="flex items-center gap-3 border-b-2 border-[var(--line)] bg-[var(--surface-alt)] px-4 py-2 font-mono text-[10px] font-bold tracking-widest">
               <span>SYSTEM CONSOLE — route.py</span>
               <span className="ml-auto text-[var(--ink-muted)]">
-                {busy ? 'BUSY' : 'READY'}
+                {busy ? 'BUSY' : code.trim() ? 'READY' : 'EMPTY FILE'}
               </span>
             </div>
 
@@ -186,7 +272,7 @@ export default function GatewayGame() {
               defaultLanguage="python"
               theme="vs-dark"
               value={code}
-              onChange={(v) => setCode(v ?? '')}
+              onChange={onCodeChange}
               options={{
                 fontSize: 13,
                 minimap: { enabled: false },
@@ -237,7 +323,9 @@ export default function GatewayGame() {
               aria-live="polite"
             >
               {consoleLines.length === 0 ? (
-                <span className="text-[var(--ink-muted)]">$ _ nothing yet</span>
+                <span className="text-[var(--ink-muted)]">
+                  $ _ nothing has run yet
+                </span>
               ) : (
                 consoleLines.map((l, i) => (
                   <div key={i} className="whitespace-pre-wrap break-words">
@@ -274,7 +362,7 @@ export default function GatewayGame() {
             />
 
             <motion.div
-              className="relative text-center"
+              className="relative w-full max-w-3xl px-6 text-center"
               initial={{ scale: 0.7, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               transition={{ type: 'spring', stiffness: 400, damping: 18 }}
@@ -283,8 +371,39 @@ export default function GatewayGame() {
                 Access granted
               </p>
               <p className="mt-4 font-mono text-[11px] tracking-[0.3em] text-[var(--ink-muted)]">
-                THREE PATHS UNLOCKED
+                YOU WROTE THE ROUTE · THE PASS FORKS THREE WAYS
               </p>
+
+              {/* The road splitting. Each lane drops in as the halves clear. */}
+              <div className="mt-8 grid gap-3 sm:grid-cols-3">
+                {PATHS.map((path, i) => (
+                  <motion.div
+                    key={path.name}
+                    className="anime-panel bg-[var(--surface)] px-4 py-5"
+                    initial={{ y: 28, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    transition={{ delay: 1.25 + i * 0.18, duration: 0.4 }}
+                  >
+                    <p className="font-[family-name:var(--font-display)] text-lg italic uppercase leading-none tracking-tight">
+                      {path.name}
+                    </p>
+                    <p className="mt-2 font-mono text-[10px] font-bold tracking-widest text-[var(--accent)]">
+                      {path.codename}
+                    </p>
+                  </motion.div>
+                ))}
+              </div>
+
+              <motion.button
+                type="button"
+                onClick={() => router.push('/dashboard')}
+                className="anime-chip mt-8 px-5 py-2.5 font-mono text-xs font-bold tracking-widest"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 1.9 }}
+              >
+                PICK YOUR PATH →
+              </motion.button>
             </motion.div>
           </motion.div>
         )}
