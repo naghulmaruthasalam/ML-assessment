@@ -1,7 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
 import ThemePullCord from '@/components/theme/ThemePullCord';
-import StatusBar from '@/components/StatusBar';
 
 export const metadata: Metadata = {
   title: 'Three Paths — ML, DL, RL',
@@ -41,10 +40,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
         <script dangerouslySetInnerHTML={{ __html: noFlashScript }} />
       </head>
-      <body className="pb-12">
+      <body>
         <ThemePullCord />
         {children}
-        <StatusBar />
       </body>
     </html>
   );

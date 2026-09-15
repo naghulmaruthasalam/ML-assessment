@@ -169,6 +169,62 @@ clearing it unlocks `/dashboard`, the three-path hub. The unlock persists in
 localStorage under `gateway-unlocked`, and a cleared player gets a skip
 button rather than solving it twice.
 
+### route.py opens empty
+
+There is no starter snippet, and that is the design, not an omission. A
+seeded `move(4)` turns the puzzle into editing someone else's solution: the
+first hairpin is already taken and the player only has to guess the rest.
+Every line that reaches the flag is written by the person at the keyboard.
+
+The command set is not hidden, though - it lives where a driver would look
+for it, inside the running machine. `help()` prints the controls, and the
+header says so once. Beyond the controls there are three sensors:
+
+| call | returns |
+| --- | --- |
+| `scan()` | clear squares straight ahead, `0` when the next one is a cliff |
+| `at_flag()` | `True` once the scooter is standing on the flag |
+| `where()` | `(x, y, heading)` right now |
+
+Sensors are what make the pass solvable as a *program* rather than a
+transcription. `while scan() > 0: move(1)`, then turn toward whichever side
+still reads clear, drives the whole mountain in eleven commands without the
+player ever counting a square by hand. Both routes - counted and sensed -
+are verified in `scripts/verify_track.py`.
+
+Answering a sensor mid-run means the bridge cannot only record; see below.
+
+### Progress up the pass, and the price of a crash
+
+Four hairpins are checkpoints. Each is a row of road narrow enough that the
+flag cannot be reached without crossing it, so `GATES` names rows rather
+than enumerating cells. Crossing one logs a line, lights a segment of the
+climb meter, and writes `gateway-best-gate` - the furthest any attempt has
+gotten, shown on the header as a badge so a player who hasn't cleared the
+pass yet still sees their own progress. The current run's squares are drawn
+as tyre tracks on the map for the same reason.
+
+Hitting the treeline is not a soft failure, though. `playCrash()` sounds,
+the scooter sits on the off-road tile for `RESTART_DELAY_MS` (1.3s) so the
+crash actually registers, and then the run wipes: position back to `S`,
+this run's climb meter and tyre tracks back to zero, and `route.py` itself
+cleared - both the editor and the `gateway-route-src` draft it's saved to.
+`gateway-best-gate` is the one thing that survives, because it is a record
+of the best attempt, not the current one. The player's own solution never
+comes back on its own; they climb again from a blank file, which is the
+whole point of the gate never having had a starter snippet to begin with.
+
+Each forward step plays a two-stroke engine "put" (`playMove()`, in
+`lib/gameSounds.ts`): a low square-wave thump layered with a short burst of
+filtered noise, which is what gives it a mechanical grit a plain oscillator
+can't produce on its own. Every sound in this file - move, crash, and the
+four-note fanfare on `playWin()` when the flag is reached - is synthesized
+with Web Audio, not an audio file, so the page's "nothing is sent anywhere"
+claim covers the sound too.
+
+Reaching the flag splits the screen and names the three paths before
+handing over to `/dashboard`.
+
 ### The bridge, and why it records instead of animating
 
 `lib/gameBridge.ts` injects `move`, `turn_left`, `turn_right`, `jump` and
@@ -178,6 +234,12 @@ milliseconds, then `planRoute()` walks the recorded commands, validates each
 step against the track, and produces frames the replay ticks through at
 260ms each.
 
+Recording alone cannot serve `scan()`, which has to answer while the
+program is still running - before a single frame has played. So the bridge
+also keeps a shadow pose that walks the track as commands come in, and the
+sensors read that. `planRoute()` stays the authority for what is drawn; the
+shadow exists only so the player's `while scan() > 0` means what it says.
+
 The obvious alternative is to await an animation inside each call. That
 poisons the player's own code: `move` becomes a coroutine, so
 `for i in range(3): jump()` silently does nothing and they would have to
@@ -186,6 +248,10 @@ when the whole point is that a beginner's `for` loop works. What the player
 sees is identical either way.
 
 Over 500 commands raises, so a runaway `while True` cannot lock the tab.
+Sensors are free of that budget - a player should be able to poll as often
+as they like - which leaves one hole: `while not at_flag(): scan()` drives
+nowhere and never ends. Reads get their own ceiling of 50,000 and an error
+that names the likely cause.
 
 ### Verifying the track
 
@@ -198,6 +264,12 @@ python3 scripts/verify_track.py
 ```
 
 It prints a reference solution - currently 16 moves and 5 turns, 11 lines.
+
+It also proves every row in `GATES` is a genuine chokepoint, by blanking the
+row and re-running the search: if the flag is still reachable, the hairpin
+can be driven around and the progress badge would count a climb the player
+skipped. Redraw the map and a gate that stops being unavoidable fails here
+rather than quietly inflating everyone's badge.
 
 ### Editing the map
 

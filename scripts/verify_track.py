@@ -14,6 +14,9 @@ SRC = pathlib.Path('lib/gameTrack.ts').read_text()
 rows = re.search(r'TRACK_ROWS = \[(.*?)\] as const', SRC, re.S).group(1)
 TRACK = re.findall(r"'([.#SF]+)'", rows)
 
+gates = re.search(r'GATES = \[(.*?)\] as const', SRC, re.S).group(1)
+GATES = [(int(row), name) for row, name in re.findall(r'row:\s*(\d+),\s*name:\s*\'([^\']+)\'', gates)]
+
 H = len(TRACK)
 W = len(TRACK[0])
 
@@ -61,6 +64,38 @@ def solve():
     return None
 
 
+def check_gates():
+    """Each gate row must be road the flag cannot be reached without crossing.
+
+    The progress badge counts hairpins cleared, so a gate row that can be
+    driven around would let a player bank credit for a climb they skipped -
+    or, worse, make the last hairpin unreachable and the badge uncappable.
+    Blanking the row and re-running the search proves it is a chokepoint.
+    """
+    global TRACK
+    original = TRACK
+    problems = []
+
+    for row, name in GATES:
+        if row >= H:
+            problems.append(f'{name}: row {row} is off the map')
+            continue
+        if 'S' in TRACK[row] or 'F' in TRACK[row]:
+            problems.append(f'{name}: row {row} holds the start or the flag')
+            continue
+        if '#' not in TRACK[row]:
+            problems.append(f'{name}: row {row} holds no road')
+            continue
+
+        TRACK = list(original)
+        TRACK[row] = '.' * W
+        if solve() is not None:
+            problems.append(f'{name}: row {row} can be driven around')
+
+    TRACK = original
+    return problems
+
+
 def condense(path):
     """Collapse runs of `move` into move(n), as a player would write it."""
     out = []
@@ -95,7 +130,14 @@ def main():
     turns = len(path) - moves
 
     print(f'ok  solvable in {moves} moves and {turns} turns')
-    print(f'ok  {len(program)} lines of Python\n')
+    print(f'ok  {len(program)} lines of Python')
+
+    problems = check_gates()
+    if problems:
+        for p in problems:
+            print(f'FAIL {p}')
+        raise SystemExit(1)
+    print(f'ok  {len(GATES)} hairpins, every one unavoidable\n')
     print('reference solution:\n')
     for line in program:
         print(f'  {line}')
